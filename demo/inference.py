@@ -170,6 +170,7 @@ def infer(self, config, model, limb_model, left_data, right_data, device):
         'pred_arm_j3d': pred_arm_j3d,
         'pred_arm_j2d': pred_arm_j2d,
         'pred_arm_vertices': pred_arm_vertices,
+        'visible_hand': visible_hand.astype(bool).reshape(-1),
     }
 
  
@@ -224,6 +225,7 @@ class Inference:
         self.set_kalman_filter_frequency(self.kalman_filter_freq)
 
         self.renderer = None
+        self._last_renderer_meta = None
         self.frame_index = 0
 
         self.stream_det  = torch.cuda.Stream()
@@ -258,6 +260,7 @@ class Inference:
             hand_type='right',
         )
         self.renderer = None
+        self._last_renderer_meta = None
         return self.camera_model
 
     def set_kalman_filter_frequency(self, freq):
@@ -279,6 +282,7 @@ class Inference:
     def reset_runtime_state(self):
         init_tracking_defaults(self)
         self.renderer = None
+        self._last_renderer_meta = None
         self.frame_index = 0
         self.grouped_hand_track_ids = {'left': None, 'right': None}
         self.grouped_hand_track_misses = {'left': 0, 'right': 0}
@@ -482,7 +486,7 @@ class Inference:
 
         return bounding_boxes
 
-    def run(self, rgb_image, device, include_arm_mesh=False):
+    def run_outputs(self, rgb_image, device):
         if self.camera_model is None or self.left_dataset is None or self.right_dataset is None:
             raise RuntimeError("Inference camera model is not initialized. Call set_camera_model(...) first.")
 
@@ -502,11 +506,19 @@ class Inference:
         print('Inference fps: ', 1 / (time.time() - c), ' time taken: (ms) ', (time.time() - c)*1000)
         print('Total fps: ', 1 / (time.time() - start_time), ' time taken: (ms) ', (time.time() - start_time)*1000)
 
+        self._last_renderer_meta = left_data[1]
+
+        return outs
+
+    def render_outputs(self, outs, rgb_image, include_arm_mesh=False):
         c = time.time()
         if self.renderer is None:
-            meta = left_data[1]
-            self.renderer = Renderer(meta)
-        
+            if self._last_renderer_meta is None:
+                raise RuntimeError(
+                    "Renderer metadata is not initialized. Run inference before rendering outputs."
+                )
+            self.renderer = Renderer(self._last_renderer_meta)
+
         render_image, tp_image = self.renderer.render(
             outs,
             self.limb_model,
@@ -516,3 +528,13 @@ class Inference:
         print('Visualization fps: ', 1 / (time.time() - c), ' time taken: (ms) ', (time.time() - c)*1000)
 
         return render_image, tp_image
+
+    def run(self, rgb_image, device, include_arm_mesh=False):
+        outs = self.run_outputs(rgb_image, device)
+        return self.render_outputs(
+            outs,
+            rgb_image,
+            include_arm_mesh=include_arm_mesh,
+        )
+
+

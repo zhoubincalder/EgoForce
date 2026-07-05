@@ -1,18 +1,20 @@
+#!/usr/bin/env python3
+
 import os
 import sys  
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
+import argparse
 import cv2
-import torch
 import numpy as np
 import aria.sdk as aria
+import threading
 
-from aria_utils import TimestampIndex
-from inference import Inference
 from camera_models import OVR624CameraModel
-from demo_utils import compose_output_frame, brighten_rgb
+from settings import config as cfg
+from unity_utils import HandVisibilityTracker, SendToUnity
 
 
 DEFAULT_CAMERA_WIDTH = 1408
@@ -47,136 +49,240 @@ def build_camera_model(width=DEFAULT_CAMERA_WIDTH, height=DEFAULT_CAMERA_HEIGHT)
     return OVR624CameraModel(f, c, params=DEFAULT_PARAMS.copy(), width=width, height=height)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Aria demo over USB by default, or over Wi-Fi when an interface/IP is provided."
+    )
+    parser.add_argument(
+        "--ip",
+        default=os.environ.get("ARIA_DEVICE_IP"),
+        help="IPv4 address of the Aria device. Required for Wi-Fi interfaces.",
+    )
+    parser.add_argument(
+        "--interface",
+        default=os.environ.get("ARIA_STREAMING_INTERFACE", "Usb"),
+        choices=["Usb", "WifiStation"],
+        help="Aria streaming transport to use. For Aria Gen 1 Python SDK, the supported options are Usb and WifiStation.",
+    )
+    parser.add_argument(
+        "--profile",
+        default=os.environ.get("ARIA_STREAMING_PROFILE", "profile21"),
+        help="Streaming profile name.",
+    )
+    parser.add_argument(
+        "--window",
+        default="Aria Inference Demo",
+        help="OpenCV window title.",
+    )
+    parser.add_argument(
+        "--wait-ms",
+        type=int,
+        default=1,
+        help="OpenCV waitKey delay in milliseconds.",
+    )
+    return parser.parse_args()
+
+
+def env_flag(name, default=True):
+    """Read a boolean environment flag without making the run script argparse-heavy."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def make_limb_vertex_buffer(outs, hand_index):
+    """Return one contiguous float32 hand+arm vertex buffer for Unity."""
+    limb_vertices = np.concatenate(
+        [outs["pred_vertices"][hand_index], outs["pred_arm_vertices"][hand_index]],
+        axis=0,
+    )
+    return np.ascontiguousarray(limb_vertices, dtype=np.float32)
+
+
+def send_outputs_to_unity(
+    unity_socket,
+    image_bgr,
+    outs,
+    frame_index,
+    visibility_tracker=None,
+    send_image=True,
+):
+    """
+    Send the current Aria frame to Unity.
+
+    Unity receives two mesh buffers:
+        - leftLimb:  hand vertices followed by arm vertices
+        - rightLimb: hand vertices followed by arm vertices
+
+    Each mesh buffer also carries a visibility flag so Unity can hide a hand after
+    a configurable number of consecutive missed detections, while reusing the last
+    valid pose during the grace period before hiding.
+
+    The image path intentionally uses BGR because SendToUnity.send_image(...)
+    expects BGR and internally converts BGR -> RGB before JPEG encoding.
+    """
+    left_limb = make_limb_vertex_buffer(outs, 0)
+    right_limb = make_limb_vertex_buffer(outs, 1)
+    hand_visible = outs.get("visible_hand", np.ones(2, dtype=bool))
+
+    if visibility_tracker is not None:
+        limb_meshes, unity_visible = visibility_tracker.resolve_mesh_buffers(
+            hand_visible,
+            [left_limb, right_limb],
+        )
+        left_limb, right_limb = limb_meshes
+    else:
+        unity_visible = np.asarray(hand_visible, dtype=bool).reshape(-1)
+
+    unity_socket.send_vertex_buffer(
+        left_limb,
+        "leftLimb",
+        frame_index,
+        visible=unity_visible[0],
+    )
+    unity_socket.send_vertex_buffer(
+        right_limb,
+        "rightLimb",
+        frame_index,
+        visible=unity_visible[1],
+    )
+
+    if send_image:
+        unity_socket.send_image(image_bgr, frame_index)
+
+        
 class StreamingClientObserver:
     def __init__(self):
-        self.queue_size = 100
-
+        self._lock = threading.Lock()
         self.rgb_data = None
-        
-        self.slam1_data = TimestampIndex(self.queue_size)
-        self.slam2_data = TimestampIndex(self.queue_size)
-        self.imu1_data = TimestampIndex(self.queue_size)
-        self.imu2_data = TimestampIndex(self.queue_size)
+        self.frame_seq = 0
 
-    def on_image_received(self, image: np.array, ImageDataRecord) -> None: 
-        if ImageDataRecord.camera_id == aria.CameraId.Rgb:
-            self.rgb_data = [image, ImageDataRecord.capture_timestamp_ns]
-        elif ImageDataRecord.camera_id == aria.CameraId.Slam1:
-            self.slam1_data.add_timestamp(image, ImageDataRecord.capture_timestamp_ns)
-        elif ImageDataRecord.camera_id == aria.CameraId.Slam2:
-            self.slam2_data.add_timestamp(image, ImageDataRecord.capture_timestamp_ns)
-        
-    def on_imu_received(self, motion_data, imu_idx) -> None:
-        for motion in motion_data:
-            data = {
-            "accel_msec2": motion.accel_msec2, 
-            "accel_valid": motion.accel_valid, 
-            "gyro_radsec": motion.gyro_radsec, 
-            "gyro_valid": motion.gyro_valid, 
+    def on_image_received(self, image: np.ndarray, image_record) -> None:
+        if image_record.camera_id == aria.CameraId.Rgb:
+            with self._lock:
+                self.frame_seq += 1
+                self.rgb_data = {
+                    "rgb_image": image,
+                    "capture_timestamp_ns": image_record.capture_timestamp_ns,
+                    "frame_seq": self.frame_seq,
+                }
 
-            }
+    def get_latest_data(self, clear=True):
+        with self._lock:
+            if self.rgb_data is None:
+                return None
 
-            if imu_idx == 0:
-                self.imu1_data.add_timestamp(data, motion.capture_timestamp_ns)
-            elif imu_idx == 1:
-                self.imu2_data.add_timestamp(data, motion.capture_timestamp_ns)
-
-    def get_data(self):
-        if self.rgb_data is None:
-            return None
-        
-        rgb_image, reference_timestamp = self.rgb_data
-
-        slam1_data = self.slam1_data.find_closest_data(reference_timestamp)
-        slam2_data = self.slam2_data.find_closest_data(reference_timestamp)
-        imu1_data = self.imu1_data.find_closest_data(reference_timestamp)
-        imu2_data = self.imu2_data.find_closest_data(reference_timestamp)
-
-        return {
-            "rgb_image": rgb_image,
-            "slam1_image": slam1_data,
-            "slam2_image": slam2_data,
-            "imu1_data": imu1_data,
-            "imu2_data": imu2_data,
-        }
+            data = self.rgb_data
+            if clear:
+                self.rgb_data = None
+            return data
 
 
-def aria_device_inference():
-    # update_iptables()
+def connect_to_device(args: argparse.Namespace):
+    if args.interface != "Usb" and not args.ip:
+        raise RuntimeError(
+            "No Aria device IP was provided. Use --ip or set ARIA_DEVICE_IP when using Wi-Fi."
+        )
 
-    #  Optional: Set SDK's log level to Trace or Debug for more verbose logs. Defaults to Info
-    aria.set_log_level(aria.Level.Trace)
-
-    # 1. Create DeviceClient instance, setting the IP address if specified
     device_client = aria.DeviceClient()
-
     client_config = aria.DeviceClientConfig()
+    if args.interface != "Usb" and args.ip:
+        client_config.ip_v4_address = args.ip
     device_client.set_client_config(client_config)
 
-    # 2. Connect to the device
     device = device_client.connect()
-
-    # 3. Retrieve the streaming_manager and streaming_client
     streaming_manager = device.streaming_manager
     streaming_client = streaming_manager.streaming_client
 
-    # 4. Set custom config for streaming
     streaming_config = aria.StreamingConfig()
-    streaming_config.profile_name = "profile21"
-    streaming_config.streaming_interface = aria.StreamingInterface.Usb
-
-    # Use ephemeral streaming certificates
+    streaming_config.profile_name = args.profile
+    streaming_config.streaming_interface = getattr(aria.StreamingInterface, args.interface)
     streaming_config.security_options.use_ephemeral_certs = True
     streaming_manager.streaming_config = streaming_config
-
-    # 5. Start streaming
     streaming_manager.start_streaming()
 
-    # 6. Get streaming state
-    streaming_state = streaming_manager.streaming_state
-    print(f"Streaming state: {streaming_state}")
-
     subscription_config = streaming_client.subscription_config
-    subscription_config.subscriber_data_type = (
-        aria.StreamingDataType.Rgb 
-    )
-
+    subscription_config.subscriber_data_type = aria.StreamingDataType.Rgb
     subscription_config.message_queue_size[aria.StreamingDataType.Rgb] = 1
 
-    # Set the security options
-    # @note we need to specify the use of ephemeral certs as this sample app assumes
-    # aria-cli was started using the --use-ephemeral-certs flag
     options = aria.StreamingSecurityOptions()
     options.use_ephemeral_certs = True
     subscription_config.security_options = options
     streaming_client.subscription_config = subscription_config
 
+    return device_client, device, streaming_manager, streaming_client
+
+
+def aria_device_inference(args: argparse.Namespace):
+    aria.set_log_level(aria.Level.Trace)
+
+    device_client, device, streaming_manager, streaming_client = connect_to_device(args)
+
+    streaming_state = streaming_manager.streaming_state
+    print(f"Streaming state: {streaming_state}")
+
+    from inference import Inference
+    from demo_utils import brighten_rgb
+
     inference = Inference(build_camera_model())
+
+    enable_unity = env_flag("UNITY_ENABLE", default=True)
+    unity_send_image = env_flag("UNITY_SEND_IMAGE", default=True)
+    unity_socket = SendToUnity() if enable_unity else None
+    unity_visibility_tracker = None
+    if unity_socket is not None:
+        unity_visibility_tracker = HandVisibilityTracker(
+            cfg.UNITY.HAND_VISIBILITY_MISS_THRESHOLD
+        )
+        print("Unity streaming enabled: tcp://*:5555")
 
     observer = StreamingClientObserver()
     streaming_client.set_streaming_client_observer(observer)
     streaming_client.subscribe()
 
-    window_name = "Aria Inference Demo"
     try:
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(args.window, cv2.WINDOW_NORMAL)
+
+        if args.interface == "Usb":
+            print("Connected to Aria device over Usb")
+        else:
+            print(f"Connected to Aria device at {args.ip} over {args.interface}")
+        print("Press q or Esc to quit")
+
+        latest_display_bgr = None
 
         while True:
-            data = observer.get_data()
-            if data is None:
-                continue
-            rgb_image = data["rgb_image"]
-            rgb_image = np.rot90(rgb_image, -1)
-            
-            rgb_image = brighten_rgb(rgb_image)
-            
-            render_image, tp_image = inference.run(rgb_image.copy(), inference.device)
-            stacked_rgb = compose_output_frame(rgb_image, render_image, tp_image)
-            stacked_bgr = cv2.cvtColor(stacked_rgb, cv2.COLOR_RGB2BGR)
+            data = observer.get_latest_data(clear=True)
+            if data is not None:
+                frame_seq = data["frame_seq"]
+                rgb_image = np.rot90(data["rgb_image"], -1)
+                rgb_image = brighten_rgb(rgb_image)
+                display_bgr = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
 
-            cv2.imshow(window_name, stacked_bgr)
-            key = cv2.waitKey(1) & 0xFF
+                outs = inference.run_outputs(
+                    rgb_image.copy(),
+                    inference.device,
+                )
+                latest_display_bgr = display_bgr
+
+                if unity_socket is not None:
+                    send_outputs_to_unity(
+                        unity_socket,
+                        display_bgr,
+                        outs,
+                        frame_seq,
+                        visibility_tracker=unity_visibility_tracker,
+                        send_image=unity_send_image,
+                    )
+
+            if latest_display_bgr is not None:
+                cv2.imshow(args.window, latest_display_bgr)
+
+            key = cv2.waitKey(args.wait_ms) & 0xFF
             if key in (27, ord("q")):
+                break
+            if cv2.getWindowProperty(args.window, cv2.WND_PROP_VISIBLE) < 1:
                 break
     except KeyboardInterrupt:
         print("Exiting...") 
@@ -189,7 +295,8 @@ def aria_device_inference():
 
 
 def main():
-    aria_device_inference()
+    args = parse_args()
+    aria_device_inference(args)
 
 
 

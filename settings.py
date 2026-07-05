@@ -101,6 +101,11 @@ config.CUDNN.BENCHMARK = True
 config.CUDNN.DETERMINISTIC = False
 config.CUDNN.ENABLED = True
 
+config.UNITY = edict()
+# Keep the last valid hand mesh for up to this many consecutive misses; the mesh
+# is hidden once the miss count reaches this threshold.
+config.UNITY.HAND_VISIBILITY_MISS_THRESHOLD = 2
+
 
 
 def _update_dict(k, v):

@@ -289,18 +289,76 @@ python demo/run_app.py --share
 
 ### Project Aria live demo
 
-The live Aria demo in [demo/run_aria.py](demo/run_aria.py) streams RGB frames from a Project Aria device over USB and runs inference frame by frame.
+The live Aria demo in [demo/run_aria.py](demo/run_aria.py) streams RGB frames from a Project Aria device and runs inference frame by frame. The same entrypoint supports both USB and Wi-Fi streaming.
 
-Run:
+The Unity visualization project lives in:
+
+```text
+unity_rendering/unity_scene
+```
+
+The current Unity scene was tested with:
+
+```text
+Unity 6000.3.17f1
+```
+
+#### Terminal 1: start EgoForce streaming
+
+Activate the environment and move into the demo directory:
 
 ```bash
-python demo/run_aria.py
+conda activate egoforce
+cd /path/to/EgoForce/demo
 ```
+
+For USB streaming, run:
+
+```bash
+python3 run_aria.py
+```
+
+For Wi-Fi streaming, pass the interface and the device IP explicitly:
+
+```bash
+python3 run_aria.py --interface WifiStation --ip 192.168.88.19
+```
+
+For Aria Gen 1, `WifiStation` is the Python SDK streaming interface for routing traffic through a Wi-Fi router. See the Gen 1 docs:
+
+- API reference: `aria.sdk.StreamingInterface.WifiStation` in the [Aria Client SDK API reference](https://facebookresearch.github.io/projectaria_tools/docs/ARK/sdk/api_reference)
+- Sample workflow: “Using Wi-Fi” in the [streaming_subscribe Gen 1 sample](https://facebookresearch.github.io/projectaria_tools/docs/ARK/sdk/samples/streaming_subscribe)
 
 Notes:
 
-- the streaming config in `run_aria.py` uses USB and ephemeral certificates
-- Check [project aria documentation](https://facebookresearch.github.io/projectaria_tools/docs/ARK/sdk/samples/streaming_subscribe) for more details on device setup.
+- `Usb` is the default interface, so no IP is required for USB mode.
+- For `WifiStation`, `--ip` is required.
+- The runner uses ephemeral streaming certificates.
+- Unity mesh streaming is enabled by default. If you want to run the Aria demo without Unity, set `UNITY_ENABLE=0`.
+
+#### Terminal 2: start Unity
+
+Open the Unity project in a second terminal:
+
+```bash
+"/path/to/Unity/Hub/Editor/6000.3.17f1/Editor/Unity" \
+  -projectPath "/path/to/EgoForce/unity_rendering/unity_scene" \
+  -force-vulkan \
+  -logFile /path/to/logs/egoforce_unity_vulkan.log
+```
+
+#### Expected runtime flow
+
+1. Start the Aria stream from Terminal 1.
+2. Start the Unity project from Terminal 2.
+3. The Python process publishes mesh buffers and camera frames to Unity over `tcp://*:5555`.
+4. Unity receives the live hand and arm meshes and displays them in the scene.
+
+#### Troubleshooting
+
+- If you run over Wi-Fi, make sure the Aria device is reachable on the selected network and that no VPN or firewall rule is intercepting the traffic.
+- If Unity opens for the first time, let it finish package import before expecting live updates.
+- Check [Project Aria streaming documentation](https://facebookresearch.github.io/projectaria_tools/docs/ARK/sdk/samples/streaming_subscribe) for device-side setup details.
 
 ## Citation
 
