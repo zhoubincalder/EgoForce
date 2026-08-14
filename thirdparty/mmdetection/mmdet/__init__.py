@@ -6,7 +6,12 @@ from mmengine.utils import digit_version
 from .version import __version__, version_info
 
 mmcv_minimum_version = '2.0.0rc4'
-mmcv_maximum_version = '2.2.0'
+# Upstream mmdet 3.3.0 shipped with this set to '2.2.0', which predates the
+# mmcv 2.2.0 release. mmcv 2.2.0 is the last release of the 2.x line and keeps
+# every API mmdet 3.3.0 uses (including mmcv.cnn.utils.fuse_conv_bn, which
+# demo/demo_utils.py imports), so the ceiling is raised one minor version to
+# allow it. Verified with the RTMDet config in demo/.
+mmcv_maximum_version = '2.3.0'
 mmcv_version = digit_version(mmcv.__version__)
 
 mmengine_minimum_version = '0.7.1'

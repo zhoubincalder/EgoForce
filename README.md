@@ -72,13 +72,55 @@ EgoForce processes a monocular egocentric RGB frame by extracting hand and forea
 
 #### 1. Create the environment
 
-The install script targets a Conda environment named `egoforce` and installs the CUDA 12.6, PyTorch 2.8, TensorRT, MMCV, AnyCalib, PyTorch3D, and Project Aria dependencies used by the repo.
+The environment is managed with [uv](https://docs.astral.sh/uv/) via a lockfile
+(`pyproject.toml` + `uv.lock`), and lives in `.venv/` in the repo root. The
+install script builds the PyTorch 2.13 / TensorRT / MMCV / AnyCalib / PyTorch3D /
+Project Aria stack.
+
+A system CUDA 13.x toolkit (`nvcc`) is required, since uv cannot provide one.
 
 ```bash
-conda create -n egoforce python=3.10 -y
-conda activate egoforce
-bash scripts/install.sh
+sudo apt-get install -y build-essential git git-lfs ffmpeg
+bash scripts/install_uv.sh
 ```
+
+Then run things with `uv run`, or `source .venv/bin/activate`:
+
+```bash
+uv run python experiments/save_predictions.py --test-dataset-name ARCTIC
+```
+
+| | version |
+|---|---|
+| Python | 3.10 |
+| torch | 2.13.0+cu132 |
+| torchvision | 0.28.0+cu132 |
+| torch_tensorrt | 2.13.0+cu132 |
+| CUDA | 13.2 (needs a 13.x `nvcc`) |
+| mmcv / mmdet / mmengine | 2.2.0 / 3.3.0 / 0.10.7 |
+| pytorch3d | 0.7.9 |
+
+CUDA 13 also covers Blackwell GPUs (RTX PRO 6000, RTX 50xx, B200 — compute
+capability 12.0, `sm_120`). Older CUDA 12.6 wheels contain no `sm_120` kernels
+and fail at the first kernel launch on those cards.
+
+`mmcv` 2.2.0 is the last release of the mmcv 2.x line; `mmdet` 3.3.0 and
+`mmengine` 0.10.7 are both already the newest releases. Upstream mmdet 3.3.0
+predates mmcv 2.2.0 and caps it at `< 2.2.0`, so
+[`thirdparty/mmdetection/mmdet/__init__.py`](thirdparty/mmdetection/mmdet/__init__.py)
+carries a one-line patch raising that ceiling to `< 2.3.0`.
+
+> **Two uv gotchas, both handled by the script:**
+>
+> 1. The compiled extensions (mmcv, pytorch3d, mmdet, …) are installed on top of
+>    the lockfile rather than in it, so a bare `uv sync` treats them as
+>    extraneous and removes them. Use `uv sync --inexact` when syncing by hand.
+>    `uv run` does not prune, so ordinary use is unaffected.
+> 2. uv caches the wheels it builds, and the cache key does **not** include the
+>    torch version they were linked against. After changing the torch version, a
+>    plain reinstall silently restores the old wheel and it fails at import with
+>    `undefined symbol: _ZN3c10...`. `install_uv.sh` stamps the torch version the
+>    extensions were built against and forces a real rebuild when it changes.
 
 #### 2. Download model weights
 
@@ -308,7 +350,7 @@ Unity 6000.3.17f1
 Activate the environment and move into the demo directory:
 
 ```bash
-conda activate egoforce
+source /path/to/EgoForce/.venv/bin/activate
 cd /path/to/EgoForce/demo
 ```
 

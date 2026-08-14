@@ -1,0 +1,114 @@
+[project]
+name = "egoforce"
+version = "0.1.0"
+description = "EgoForce: egocentric hand-arm pose and force estimation"
+readme = "README.md"
+requires-python = "==3.10.*"
+
+dependencies = [
+    # --- core numerics / io ---
+    "numpy==1.26.4",
+    "scipy",
+    "opencv-python==4.12.0.88",
+    "pillow==11.3.0",
+    "matplotlib==3.10.6",
+    "pyyaml==6.0.2",
+    "easydict==1.13",
+    "yacs==0.1.8",
+    "addict==2.4.0",
+    "h5py==3.15.1",
+    "lmdb==2.0.0",
+    "msgpack",
+    "pyzmq",
+    "sortedcontainers==2.4.0",
+    "tqdm==4.67.1",
+    "aiofiles==24.1.0",
+    "async-lru==2.0.5",
+
+    # --- torch stack (see [tool.uv.sources]: pinned to the cu132 index) ---
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    # the flat torch-tensorrt index carries several CUDA builds of each version
+    # under the same version number, so the local segment has to be pinned to
+    # match torch
+    "torch-tensorrt==2.13.0+cu132",
+
+    # --- vision / model zoo ---
+    "timm==1.0.20",
+    # only reached through mmdet's multimodal detectors (GLIP / Grounding DINO),
+    # which target the 4.x API; nothing in this repo imports it directly
+    "transformers<5",
+    "ultralytics==8.4.23",
+    "lap==0.5.13",
+    "pycocotools==2.0.10",
+    "openmim==0.3.9",
+
+    "fvcore==0.1.5.post20221221",
+    "iopath==0.1.10",
+
+    # --- 3d / mesh / rendering ---
+    "smplx==0.1.28",
+    "trimesh==4.11.3",
+    "pyrender==0.1.45",
+
+    # --- aria capture ---
+    "projectaria-client-sdk==1.1.0",
+]
+
+[project.optional-dependencies]
+# Only needed to run demo/run_app.py. `spaces` is a Hugging Face Spaces shim and
+# is a no-op outside of Spaces, but run_app.py imports it unconditionally.
+demo = [
+    "gradio==6.9.0",
+    "spaces",
+]
+# demo/run_app_vrs.py additionally needs `pyvrs`, which PyPI ships as an sdist
+# only -- it builds the VRS C++ library from source and needs cmake plus
+# lz4/zstd/xxhash/boost dev headers. It has never been part of the declared
+# dependency set, so it is left out of the default sync. Install on demand with:
+#   uv pip install pyvrs
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core", "models", "datasets", "utils", "camera_models"]
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+
+[tool.uv]
+# Several deps (opencv, ultralytics, ...) declare numpy>=2, but the compiled
+# extensions in this repo are built against the numpy 1.x ABI. Stating it as an
+# override keeps 1.26.4 present from the start, rather than relying on a
+# force-downgrade after everything else has already been installed and built.
+override-dependencies = ["numpy==1.26.4"]
+
+# These build C++/CUDA extensions against the *installed* torch, so they must
+# see it at build time rather than in an isolated PEP 517 env. They are
+# installed by scripts/install_uv.sh after the base sync, not by `uv sync`.
+no-build-isolation-package = [
+    "mmcv",
+    "mmdet",
+    "pytorch3d",
+    "chumpy",
+    "anycalib",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[[tool.uv.index]]
+name = "torch-tensorrt"
+url = "https://download.pytorch.org/whl/torch-tensorrt"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
+torch-tensorrt = { index = "torch-tensorrt" }
