@@ -129,9 +129,15 @@ def compile_to_tensorrt(model, device):
     x1, x2, x3, x4 = torch.rand([2, 1, 3, 224, 224]), torch.rand([2, 1, 3, 6, 2]), torch.rand([2, 1, 3, 224, 224]), torch.rand([2, 1, 3, 6, 2])
     x1, x2, x3, x4 = x1.to(device), x2.to(device), x3.to(device), x4.to(device)
 
+    # The .half()/.to() conversion must happen OUTSIDE inference_mode. Parameters
+    # created inside an inference_mode block are inference tensors, and
+    # torch.jit.trace's sanity check re-runs the module on them -- which on
+    # torch >= 2.9 surfaces as a cuBLAS CUBLAS_STATUS_INTERNAL_ERROR (or an
+    # illegal memory access) inside MultiheadAttention rather than a clean error.
+    model = model.to(device).half()
+    x1, x2, x3, x4 = x1.half(), x2.half(), x3.half(), x4.half()
+
     with torch.inference_mode():
-        model = model.to(device).half()
-        x1, x2, x3, x4 = x1.half(), x2.half(), x3.half(), x4.half()
         model = torch.jit.trace(model, (x1, x2, x3, x4), strict=False)
 
     backend_kwargs = {

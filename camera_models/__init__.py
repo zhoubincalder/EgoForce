@@ -2,6 +2,7 @@ from .fisheye624 import OVR624CameraModel
 from .pinhole import PinholeCameraModel
 from .rational8 import Rational8CameraModel
 from .kannalabrandtk3 import KannalaBrandtK3CameraModel
+from .seucm import SeucmCameraModel
 from .to_pinhole_camera import ToPinholeCamera
 from .to_stereographic import ToStereographicCamera
 from .to_equisolid import ToEquisolidCamera
