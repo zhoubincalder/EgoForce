@@ -6,6 +6,7 @@ from camera_models.rational8_pytorch3d import Rational8CameraPytorch3D
 from camera_models.pinhole_pytorch3d import PinholeCameraPytorch3D
 from camera_models.kannalabrandtk3_pytorch3d import KannalaBrandtK3CameraPytorch3D
 from camera_models.equisolid_pytorch3d import EquisolidCameraPytorch3D
+from camera_models.seucm import seucm_unproject_dirs
 from camera_models.equirectangular_pytorch3d import EquirectangularCameraPytorch3D
 from camera_models.stereographic_pytorch3d import StereographicCameraPytorch3D
 
@@ -51,6 +52,7 @@ def unproject_unit_rays(cfg, meta, j2d):
     mask_equisolid = (camera_type == 5)
     mask_equirectangular = (camera_type == 6)
     mask_stereographic = (camera_type == 7)
+    mask_seucm = (camera_type == 8)
 
     idx_pinhole = mask_pinhole.nonzero(as_tuple=True)[0]
     idx_rational = mask_rational.nonzero(as_tuple=True)[0]
@@ -59,6 +61,7 @@ def unproject_unit_rays(cfg, meta, j2d):
     idx_equisolid = mask_equisolid.nonzero(as_tuple=True)[0]
     idx_equirectangular = mask_equirectangular.nonzero(as_tuple=True)[0]
     idx_stereographic = mask_stereographic.nonzero(as_tuple=True)[0]
+    idx_seucm = mask_seucm.nonzero(as_tuple=True)[0]
 
 
     hcrop_size = hand_crop_size.unsqueeze(1)     
@@ -151,6 +154,20 @@ def unproject_unit_rays(cfg, meta, j2d):
         )
         dir_stereographic = cam_stereographic.inverse_evaluate(uv_norm[idx_stereographic])
         direction[idx_stereographic] = dir_stereographic
+
+    if idx_seucm.numel() > 0:
+        # projection_params packs [fx, cx, cy, *model.params]; SEUCM's
+        # (alpha, beta, eu, ev) therefore live at 3:7. SEUCM projects about its
+        # own distortion centre (eu, ev), so undo the (uv - c) / f normalisation
+        # and unproject from absolute pixels.
+        f_seucm = focal_length[idx_seucm]
+        c_seucm = principal_point[idx_seucm]
+        p_seucm = projection_params[idx_seucm][:, 3:7]
+        uv_seucm = uv_norm[idx_seucm] * f_seucm[:, None, :] + c_seucm[:, None, :]
+        direction[idx_seucm] = seucm_unproject_dirs(
+            uv_seucm, f_seucm, c_seucm,
+            p_seucm[:, 0], p_seucm[:, 1], p_seucm[:, 2], p_seucm[:, 3],
+        )
 
     direction = direction / torch.linalg.norm(direction, dim=-1, keepdim=True).clamp_min(1e-12)
 

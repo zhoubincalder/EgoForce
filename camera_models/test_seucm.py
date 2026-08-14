@@ -83,6 +83,32 @@ def main():
         failures.append('autograd finite')
     print(f'{"autograd finite":26s}: {bool(torch.isfinite(tp_g.grad).all())}')
 
+    # batched ray helper used by core/rss.py must agree with camera_to_uv
+    from camera_models.seucm import seucm_unproject_dirs
+    uv_t = torch.tensor(uv, dtype=torch.float32)[None]                  # (1,N,2)
+    dirs = seucm_unproject_dirs(uv_t,
+                                torch.tensor([[FX, FY]]), torch.tensor([[CX, CY]]),
+                                torch.tensor([ALPHA]), torch.tensor([BETA]),
+                                torch.tensor([EU]), torch.tensor([EV]))
+    reproj = cam.camera_to_uv(dirs[0].numpy())
+    check('batched rays -> uv', float(np.abs(reproj - uv).max()), 5e-2, ' px')
+
+    # TYPE_ID must not collide with the ids core/rss.py dispatches on
+    ids = {}
+    import camera_models as cm
+    for name in dir(cm):
+        obj = getattr(cm, name)
+        tid = getattr(obj, 'TYPE_ID', None)
+        if isinstance(tid, int):
+            ids.setdefault(tid, []).append(name)
+    reserved = {0: 'pinhole', 2: 'rational8', 3: 'fisheye624', 4: 'kb3',
+                5: 'equisolid', 6: 'equirectangular', 7: 'stereographic'}
+    clash = SeucmCameraModel.TYPE_ID in reserved or len(ids.get(SeucmCameraModel.TYPE_ID, [])) > 1
+    print(f'{"TYPE_ID free":26s}: {SeucmCameraModel.TYPE_ID} '
+          f'{"FAIL (collides with " + reserved.get(SeucmCameraModel.TYPE_ID, "another model") + ")" if clash else "ok"}')
+    if clash:
+        failures.append('TYPE_ID collision')
+
     # interface parity with the other camera models
     need = ['camera_to_uv', 'camera_to_uvd', 'camera_to_uvz', 'camera_to_d', 'uvd_to_camera',
             'uvz_to_camera', 'uv_to_theta_x_y', 'to_intrinsics_keypoint_encoding', 'distort3d',

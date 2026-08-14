@@ -95,6 +95,37 @@ def _unproject(u, v, fx, fy, cx, cy, alpha, beta, eu, ev, lib):
     return mx + e_u * mz, my + e_v * mz, mz
 
 
+def seucm_unproject_dirs(uv, f, c, alpha, beta, eu, ev):
+    """Batched SEUCM unprojection for the ray-space solver.
+
+    uv:              (B, N, 2) absolute pixel coordinates
+    f, c:            (B, 2)
+    alpha..ev:       (B,)
+    returns:         (B, N, 3) un-normalised bearings (caller normalises)
+    """
+    fx, fy = f[:, 0:1], f[:, 1:2]
+    cx, cy = c[:, 0:1], c[:, 1:2]
+    a = alpha[:, None]
+    b = beta[:, None]
+    eu_ = eu[:, None]
+    ev_ = ev[:, None]
+
+    e_u = (eu_ - cx) / fx
+    e_v = (ev_ - cy) / fy
+
+    mx = (uv[..., 0] - eu_) / fx
+    my = (uv[..., 1] - ev_) / fy
+    r2 = mx * mx + my * my
+
+    disc = 1.0 - (2.0 * a - 1.0) * b * r2
+    disc = torch.clamp(disc, min=0.0)
+    denom = (1.0 - a) + a * torch.sqrt(disc)
+    denom = torch.where(denom.abs() < 1e-12, torch.full_like(denom, 1e-12), denom)
+
+    mz = (1.0 - a * a * b * r2) / denom
+    return torch.stack([mx + e_u * mz, my + e_v * mz, mz], dim=-1)
+
+
 def _safe(x, lib, eps=1e-12):
     """Clamp away from zero, keeping sign, so divisions stay finite."""
     if lib is torch:
@@ -122,7 +153,9 @@ class SeucmCameraModel:
     """
 
     TYPE = "seucm"
-    TYPE_ID = 5
+    # 0 pinhole, 2 rational8, 3 fisheye624, 4 KB3, 5 equisolid,
+    # 6 equirectangular, 7 stereographic -- see unproject_unit_rays in core/rss.py.
+    TYPE_ID = 8
 
     def __init__(self, f, c, params: Sequence[float], width: int, height: int):
         assert len(f) == 2, "Focal length must be a 2D vector (fx, fy)"

@@ -119,9 +119,17 @@ def init_tracking_defaults(self):
     self.arm_attach_iou = 0.20     # when selecting arm from current detections (pre-fallback)
     self.hand_stable_iou = 0.80    # 20% change threshold for fallback (IoU >= 0.8)
     self.arm_stable_iou = 0.85     # 40% change threshold for fallback (IoU >= 0.6)
+    # Bounds on how long the stable-box fallback may hold a box. Without these
+    # the IoU test stays satisfied frame after frame on slow hand motion, so the
+    # crop box freezes and slides off the hand while the detector keeps tracking
+    # it correctly -- the crop goes stale, the pose degrades, and the hand can
+    # be placed at or behind the camera.
+    self.hand_freeze_max_drift_px = 12.0   # break the freeze past this centre drift
+    self.hand_freeze_max_frames = 15       # ...or after this many consecutive reuses
     # state for fallback
     self.prev_boxes = {'left': {'hand': None, 'arm': None},
                     'right': {'hand': None, 'arm': None}}
+    self.hand_freeze_count = {'left': 0, 'right': 0}
 
 
 
@@ -290,6 +298,38 @@ def compute_bbox_iou(a, b):
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
     return float(iou_xyxy_one_to_many(a, b[None, :])[0])
+
+
+def _bbox_center(b):
+    b = np.asarray(b, dtype=np.float32).reshape(-1)[:4]
+    return np.array([0.5 * (b[0] + b[2]), 0.5 * (b[1] + b[3])], dtype=np.float32)
+
+
+def should_reuse_previous_box(prev_bbox, curr_bbox, iou, iou_thr,
+                              held_frames, max_drift_px, max_frames):
+    """Decide whether the stable-box fallback may reuse ``prev_bbox``.
+
+    Reusing the previous box suppresses per-frame jitter, but the IoU test alone
+    never expires: on slow hand motion consecutive boxes keep overlapping above
+    the threshold, so the crop box freezes indefinitely while the hand walks out
+    from under it. The detector stays correct the whole time -- it is the *crop*
+    that goes stale, and a mis-centred crop degrades the pose enough that the
+    ray-space solve can place the hand at or behind the camera.
+
+    So the reuse is bounded two ways: by how far the held box has drifted from
+    the live detection, and by how many consecutive frames it has been held.
+
+    Returns True when the previous box should be reused.
+    """
+    if iou < iou_thr:
+        return False
+    if max_frames is not None and held_frames >= max_frames:
+        return False
+    if max_drift_px is not None:
+        drift = float(np.linalg.norm(_bbox_center(prev_bbox) - _bbox_center(curr_bbox)))
+        if drift > max_drift_px:
+            return False
+    return True
 
 
 

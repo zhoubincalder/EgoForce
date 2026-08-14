@@ -465,11 +465,24 @@ class Inference:
 
             cur_prev_hand_iou = compute_bbox_iou(curr_hand['bbox'], prev_hand['bbox'])
 
-            if cur_prev_hand_iou >= hand_stable_iou:
+            # Bounded reuse -- see should_reuse_previous_box for why the IoU test
+            # alone lets the crop box freeze onto a stale position.
+            freeze = should_reuse_previous_box(
+                prev_hand['bbox'], curr_hand['bbox'],
+                cur_prev_hand_iou, hand_stable_iou,
+                self.hand_freeze_count.get(side, 0),
+                self.hand_freeze_max_drift_px,
+                self.hand_freeze_max_frames,
+            )
+
+            if freeze:
                 curr_hand['bbox'] = np.asarray(prev_hand['bbox'], dtype=np.float32).copy()
+                self.hand_freeze_count[side] = self.hand_freeze_count.get(side, 0) + 1
+            else:
+                self.hand_freeze_count[side] = 0
 
             if ('arm' not in bounding_boxes[side]) and (prev_arm is not None):
-                if cur_prev_hand_iou >= hand_stable_iou:
+                if freeze:
                     pb = np.asarray(prev_arm['bbox'], dtype=np.float32).copy()
                     bounding_boxes[side]['arm'] = {
                         'bbox': pb,
